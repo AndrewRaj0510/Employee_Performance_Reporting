@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 from orchestrator import process_query
 
@@ -32,8 +32,14 @@ app.add_middleware(
 )
 
 # ── Pydantic Models ────────────────────────────────────────────────────────────
+class HistoryTurn(BaseModel):
+    role: str                        # "user" or "assistant"
+    content: str
+    sql_query: Optional[str] = None  # populated for assistant turns that ran SQL
+
 class ChatRequest(BaseModel):
     query: str
+    history: List[HistoryTurn] = []
 
 class EvidenceModel(BaseModel):
     sql_query: Optional[str] = None
@@ -45,7 +51,7 @@ class EvidenceModel(BaseModel):
 
 class ChatResponse(BaseModel):
     response_text: str
-    intent: str  # "SQL" | "VECTOR" | "BOTH"
+    intent: str  # "SQL" | "VECTOR" | "BOTH" | "FOLLOWUP"
     evidence: EvidenceModel
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -63,7 +69,8 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     try:
-        result = process_query(request.query.strip())
+        history = [{"role": t.role, "content": t.content} for t in request.history]
+        result = process_query(request.query.strip(), history=history)
         return ChatResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

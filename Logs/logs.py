@@ -1,14 +1,20 @@
+import os
 import psycopg2
 import time
+from dotenv import load_dotenv
 
-# --- CONFIGURATION ---
+# Load .env from the POC root (two levels up from Logs/)
+_POC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(_POC_ROOT, ".env"))
+
 DB_CONFIG = {
-    "dbname": "poc",
-    "user": "postgres",
-    "password": "",
-    "host": "localhost",
-    "port": "5432"
+    "dbname":   os.getenv("POSTGRES_DB",       "poc"),
+    "user":     os.getenv("POSTGRES_USER",     "postgres"),
+    "password": os.getenv("POSTGRES_PASSWORD", ""),
+    "host":     os.getenv("POSTGRES_HOST",     "localhost"),
+    "port":     os.getenv("POSTGRES_PORT",     "5432"),
 }
+
 
 def log_interaction(query, intent, tool, context, response, start_time):
     """

@@ -1,17 +1,22 @@
+import os
 import psycopg2
 from psycopg2 import sql
 import random
 from datetime import date, timedelta
+from dotenv import load_dotenv
+
+_POC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(_POC_ROOT, ".env"))
 
 # ==========================================
 # 1. DATABASE CONFIGURATION
 # ==========================================
 DB_CONFIG = {
-    "dbname": "poc",     
-    "user": "postgres",       
-    "password": "",   
-    "host": "localhost",
-    "port": "5432"
+    "dbname":   os.getenv("POSTGRES_DB",       "poc"),
+    "user":     os.getenv("POSTGRES_USER",     "postgres"),
+    "password": os.getenv("POSTGRES_PASSWORD", ""),
+    "host":     os.getenv("POSTGRES_HOST",     "localhost"),
+    "port":     os.getenv("POSTGRES_PORT",     "5432"),
 }
 
 # ==========================================

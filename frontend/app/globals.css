@@ -1,8 +1,30 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
-:root {
+/* Use class-based dark mode so our ThemeProvider controls it */
+@variant dark (&:where(.dark, .dark *));
+
+/* ── Light mode ── */
+:root,
+.light {
+  color-scheme: light;
+  --bg-page:    #f3f4f6;   /* gray-100 */
+  --bg-surface: #ffffff;
+  --bg-raised:  #e5e7eb;   /* gray-200 */
+  --text-base:  #111827;   /* gray-900 */
+  --text-muted: #6b7280;   /* gray-500 */
+  --border:     #d1d5db;   /* gray-300 */
+}
+
+/* ── Dark mode ── */
+.dark {
   color-scheme: dark;
+  --bg-page:    #030712;   /* gray-950 */
+  --bg-surface: #111827;   /* gray-900 */
+  --bg-raised:  #1f2937;   /* gray-800 */
+  --text-base:  #f9fafb;   /* gray-50  */
+  --text-muted: #9ca3af;   /* gray-400 */
+  --border:     #374151;   /* gray-700 */
 }
 
 html,
@@ -10,9 +32,9 @@ body {
   height: 100%;
   margin: 0;
   padding: 0;
-  background-color: #030712;
-  /* gray-950 */
-  color: #f9fafb;
+  background-color: var(--bg-page);
+  color: var(--text-base);
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 /* Scrollbar styling */
@@ -26,12 +48,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #374151;
+  background: var(--border);
   border-radius: 99px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #4b5563;
+  background: var(--text-muted);
 }
 
 /* Smooth scroll */
