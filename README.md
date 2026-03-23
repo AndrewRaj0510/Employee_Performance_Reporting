@@ -8,23 +8,7 @@ Ask questions like *"How many hours did Alex work last month?"* (SQL) or *"What 
 
 ## Architecture
 
-```
-Browser → POST /api/chat → FastAPI (backend/main.py)
-                               ↓
-                        orchestrator.process_query()
-                               ↓
-              ┌── decide_route() → SQL | VECTOR | BOTH
-              │
-              ├── SQL path:    text_to_sql_pipeline() → PostgreSQL
-              ├── VECTOR path: query_vector_db()      → ChromaDB
-              └── BOTH:        decompose → run both   → merge
-                               ↓
-                        synthesize_answer() via Ollama LLM
-                               ↓
-                        log_interaction() → techies_audit_logs table
-                               ↓
-                        ChatResponse { text, intent, evidence }
-```
+<img width="2788" height="2260" alt="diagram-export-3-9-2026-9_11_11-AM" src="https://github.com/user-attachments/assets/b53de441-3389-4eff-af57-3213fc2f1393" />
 
 ### How It Works
 
@@ -168,7 +152,7 @@ EMBEDDING_MODEL=all-MiniLM-L6-v2
 ```bash
 python -m venv venv
 source venv/bin/activate        # Linux/Mac
-# venv\Scripts\activate         # Windows
+# venv\scripts\Activate         # Windows
 
 pip install -r requirements.txt
 pip install -r backend/requirements_backend.txt
@@ -283,3 +267,7 @@ The orchestrator maintains **server-side SQL session memory** so follow-up quest
 ## License
 
 This project is for internal use and proof-of-concept purposes.
+
+## Screenshots
+<img width="1919" height="862" alt="Screenshot 2026-03-23 155918" src="https://github.com/user-attachments/assets/ea27ae63-5a8c-415b-b446-48c6c73e24fe" />
+<img width="1919" height="862" alt="Screenshot 2026-03-23 160035" src="https://github.com/user-attachments/assets/64af0756-003b-4315-b131-2f14d08eb6b7" />
