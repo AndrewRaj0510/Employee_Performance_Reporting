@@ -8,11 +8,12 @@ _POC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_POC_ROOT, ".env"))
 
 DB_CONFIG = {
-    "dbname":   os.getenv("POSTGRES_DB",       "poc"),
+    "dbname":   os.getenv("POSTGRES_DB",       "postgres"),
     "user":     os.getenv("POSTGRES_USER",     "postgres"),
     "password": os.getenv("POSTGRES_PASSWORD", ""),
     "host":     os.getenv("POSTGRES_HOST",     "localhost"),
     "port":     os.getenv("POSTGRES_PORT",     "5432"),
+    "sslmode":  "require",
 }
 
 client = OpenAI(
@@ -20,6 +21,54 @@ client = OpenAI(
     api_key=os.getenv("OLLAMA_API_KEY",   "ollama"),
 )
 MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud")
+
+# ── Static system prompts (cached by Ollama's KV cache after first call) ──────
+
+_SQL_SYSTEM = """You are a SQL Assistant. Convert the user's question into a PostgreSQL query.
+
+Table: techies_employees
+Columns: "Employee Number", "Full Name", "Email", "Date of Joining", "Job Title",
+         "Business Unit", "Department", "Sub Department", "Location", "Cost Center",
+         "Legal Entity", "Band", "Reporting To", "Dotted Line Manager"
+
+Table: techies_timesheets
+Columns: "Timesheet Period", "Location", "Employee Number", "Employee Name",
+         "Project Code", "Project Name", "Project Description", "Task Name",
+         "Time Entry Comments", "Date", "Total Hours", "Task Estimated Hours",
+         "Task Spent Hours", "Time Entry Hours (Billable)", "Time Entry Hours (Non Billable)"
+
+"Employee Number" is the join key between the two tables.
+All column names contain spaces — ALWAYS double-quote them in the query.
+
+RULES:
+1. KEEP IT SIMPLE: Write the most basic, straightforward query possible. Rely on simple SELECT, WHERE, GROUP BY, and ORDER BY clauses.
+2. NO COMPLEX LOGIC: Do NOT use Window Functions (OVER/PARTITION), Common Table Expressions (WITH), or complex nested subqueries.
+3. THE DATE RULE (STRICT): NEVER apply default date, month, or year filters unless the user EXPLICITLY asks for a specific date/year. If no timeframe is requested, query all available history.
+4. NO EXPLANATIONS: Return ONLY the raw executable SQL query. Do not include markdown formatting (like ```sql), backticks, or conversational text.
+5. Use JOIN to combine tables when needed, joining on "Employee Number".
+6. If questions are asked about departments/roles/locations always GROUP BY them."""
+
+_SQL_UPDATE_SYSTEM = """You are a PostgreSQL expert. Rewrite a given SQL query to satisfy a user's follow-up request.
+
+Table: techies_employees
+Columns: "Employee Number", "Full Name", "Email", "Date of Joining", "Job Title",
+         "Business Unit", "Department", "Sub Department", "Location", "Cost Center",
+         "Legal Entity", "Band", "Reporting To", "Dotted Line Manager"
+
+Table: techies_timesheets
+Columns: "Timesheet Period", "Location", "Employee Number", "Employee Name",
+         "Project Code", "Project Name", "Project Description", "Task Name",
+         "Time Entry Comments", "Date", "Total Hours", "Task Estimated Hours",
+         "Task Spent Hours", "Time Entry Hours (Billable)", "Time Entry Hours (Non Billable)"
+
+"Employee Number" is the join key between the two tables.
+All column names contain spaces — ALWAYS double-quote them in the query.
+
+RULES:
+1. Keep changes minimal — only add/remove columns, joins, or filters as needed.
+2. NEVER add date/year filters unless the user explicitly requests a specific date/year.
+3. Do NOT use Window Functions (OVER/PARTITION), CTEs (WITH), or complex nested subqueries.
+4. Return ONLY the raw executable SQL. No markdown, no backticks, no explanation."""
 
 
 def execute_sql(query):
@@ -36,6 +85,7 @@ def execute_sql(query):
     finally:
         if conn: conn.close()
 
+
 def text_to_sql_pipeline(user_question):
     """
     Converts natural language to SQL, runs it, and returns a structured dict.
@@ -43,51 +93,27 @@ def text_to_sql_pipeline(user_question):
     """
     print(f"   (SQL Tool) Thinking about: '{user_question}'...")
 
-    prompt = f"""
-    You are a SQL Assistant. Convert the user's question into a PostgreSQL query.
-    
-    Table: timesheets
-  - timesheet_id, emp_id, week_ending_date, hours_worked, overtime_hours, projects_worked, status
-
-    Table: employees
-  - emp_id, full_name, role, department, manager_name, date_joined, email, annual_salary, is_active
-
-    Table: billing_finances
-  - record_id, emp_id, pay_period_end, gross_pay, tax_deductions, benefits_deduction, net_pay, currency
-
-    emp_id is the primary key in employees and a foreign key in timesheets.
-
-    RULES:
-    1. KEEP IT SIMPLE: Write the most basic, straightforward query possible. Rely on simple SELECT, WHERE, GROUP BY, and ORDER BY clauses. 
-    2. NO COMPLEX LOGIC: Do NOT use Window Functions (OVER/PARTITION), Common Table Expressions (WITH), or complex nested subqueries.
-    3. THE DATE RULE (STRICT): NEVER apply default date, month, or year filters (e.g., never add `WHERE EXTRACT(YEAR FROM date) = 2026`). ONLY filter by date/year if the user EXPLICITLY asks for a specific year in the prompt(Ex:- '2026' or in  'the year 2026' or 'in 2026'). If no timeframe is requested, query all available history.
-    4. NO EXPLANATIONS: Return ONLY the raw executable SQL query. Do not include markdown formatting (like ```sql), backticks, or conversational text.
-    5. Use join to combine tables if needed.
-    6. If questions are asked about departments/roles always group them.
-    
-    User Question: {user_question}
-    """
-    
     try:
         response = client.chat.completions.create(
-            model="gpt-oss:20b-cloud",
-            messages=[{"role": "user", "content": prompt}],
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": _SQL_SYSTEM},
+                {"role": "user",   "content": user_question},
+            ],
             temperature=0.1
         )
-        
+
         sql_query = response.choices[0].message.content.strip()
         sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
-        
+
         print(f"(SQL Tool) Executing: {sql_query}")
         columns, data = execute_sql(sql_query)
-        
+
         if columns is None:
-            # data is the error string when columns is None
             return {"sql_query": sql_query, "columns": None, "rows": None, "error": f"SQL Error: {data}"}
         elif not data:
             return {"sql_query": sql_query, "columns": columns, "rows": [], "error": "Query returned no data."}
         else:
-            # Convert tuples to lists so the result is JSON-serialisable
             rows = [list(row) for row in data]
             return {"sql_query": sql_query, "columns": columns, "rows": rows, "error": None}
 
@@ -106,38 +132,15 @@ def update_sql_response(followup_question: str, prior_sql: str):
     print(f"(SQL Update Tool) Prior SQL  : {prior_sql}")
     print(f"(SQL Update Tool) Follow-up  : '{followup_question}'")
 
-    prompt = f"""
-    You are a PostgreSQL expert. Rewrite the SQL query below to satisfy the user's follow-up request.
-
-    === PREVIOUS SQL QUERY ===
-    {prior_sql}
-
-    === DATABASE SCHEMA ===
-    Table: timesheets
-    - timesheet_id, emp_id, week_ending_date, hours_worked, overtime_hours, projects_worked, status
-
-    Table: employees
-    - emp_id, full_name, role, department, manager_name, date_joined, email, annual_salary, is_active
-
-    Table: billing_finances
-    - record_id, emp_id, pay_period_end, gross_pay, tax_deductions, benefits_deduction, net_pay, currency
-
-    emp_id is the primary key in employees and a foreign key in timesheets and billing_finances.
-
-    === USER FOLLOW-UP REQUEST ===
-    "{followup_question}"
-
-    === RULES ===
-    1. Keep changes minimal — only add/remove columns, joins, or filters as needed.
-    2. NEVER add date/year filters unless the user explicitly requests a specific date/year.
-    3. Do NOT use Window Functions (OVER/PARTITION), CTEs (WITH), or complex nested subqueries.
-    4. Return ONLY the raw executable SQL. No markdown, no backticks, no explanation.
-    """
+    user_msg = f"Previous SQL:\n{prior_sql}\n\nFollow-up request: {followup_question}"
 
     try:
         response = client.chat.completions.create(
-            model="gpt-oss:20b-cloud",
-            messages=[{"role": "user", "content": prompt}],
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": _SQL_UPDATE_SYSTEM},
+                {"role": "user",   "content": user_msg},
+            ],
             temperature=0.1
         )
 

@@ -26,18 +26,65 @@ client = OpenAI(
 MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud")
 
 # ── Server-side session memory ────────────────────────────────────────────────
-# Stores the most recently executed SQL query so follow-ups can find it
-# without relying on the frontend to pass it back.
 _session_sql_memory: Dict[str, str] = {}
+
+# ── Static system prompts (KV-cached by Ollama after first call) ──────────────
+
+_FOLLOWUP_SYSTEM = """You are a conversation classifier. Decide whether the user's NEW message is a follow-up to the previous assistant response, or a completely new, standalone question.
+
+A follow-up:
+- References "your previous response", "that table", "the result above", "add X to it", etc.
+- Cannot be understood without the previous assistant response.
+- Asks to modify, extend, reformat, or clarify the previous answer.
+
+A new question:
+- Is self-contained and makes sense on its own.
+- Asks about a different topic or different data.
+
+Respond with ONLY one word: FOLLOWUP or NEW"""
+
+_ROUTER_SYSTEM = """You are an Intent Router. Classify the user query into ONE category.
+
+1. SQL: Questions about NUMBERS, HOURS, DATES, RATES, or TIMESHEETS.
+2. VECTOR: Questions about REVIEWS, FEEDBACK, OPINIONS, PRAISES, or TEXT SUMMARIES.
+3. BOTH: Questions asking for BOTH numbers AND qualitative feedback.
+
+Output ONLY the category name: SQL, VECTOR, or BOTH."""
+
+_DECOMPOSE_SYSTEM = """You are a Query Decomposer. The user has asked a complex question that requires data from TWO sources:
+1. SQL Database (Employee hours, rates, project stats)
+2. Vector Database (Performance reviews, qualitative feedback, praises)
+
+Break the question into two separate, standalone questions.
+- The SQL question should ask ONLY for the specific numbers/stats mentioned.
+- The Vector question should ask ONLY for the qualitative review/feedback mentioned.
+
+Output Format:
+SQL: [Insert SQL-focused question]
+VECTOR: [Insert Vector-focused question]"""
+
+_SYNTH_SYSTEM = """You are an HR Insight Assistant. Answer the user's question using data retrieved from SQL and/or Vector databases.
+
+Instructions:
+- Use SQL data for numeric insights (hours, rates, project stats).
+- Use Vector data for qualitative insights (reviews, feedback, praises).
+- If the user asked for a comparison, explicitly compare numbers with text insights.
+- Always provide a clear, concise answer that directly addresses the question.
+- Avoid repeating the data; synthesize it into actionable insights.
+- Provide a final recommendation if the data suggests one.
+- Use markdown formatting (bold, lists, tables) for clarity.
+- Be concise and professional."""
+
+_FOLLOWUP_SYNTH_SYSTEM = """You are an HR Insight Assistant. Answer the user's follow-up question using the SQL data provided.
+
+Instructions:
+- Use ONLY the data provided — do NOT invent numbers.
+- Add a brief 1–2 sentence insight below your answer.
+- Use markdown formatting."""
 
 
 # ── Follow-up Classifier ──────────────────────────────────────────────────────
 def is_followup(question: str, history: List[Dict]) -> bool:
-    """
-    Returns True if the question is a follow-up that relies on the prior
-    conversation context (e.g. "add employee name to your previous response").
-    Always prints its decision to the terminal.
-    """
     print("\n" + "─" * 55)
     print("FOLLOW-UP CLASSIFIER")
     print(f"Query : {question[:80]}{'...' if len(question) > 80 else ''}")
@@ -47,7 +94,6 @@ def is_followup(question: str, history: List[Dict]) -> bool:
         print("─" * 55)
         return False
 
-    # Only look back at the last assistant turn for efficiency
     last_assistant = next(
         (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
     )
@@ -56,31 +102,17 @@ def is_followup(question: str, history: List[Dict]) -> bool:
         print("─" * 55)
         return False
 
-    prompt = f"""
-    You are a conversation classifier. Decide whether the user's NEW message is a follow-up 
-    to the previous assistant response, or a completely new, standalone question.
+    user_msg = (
+        f'Previous assistant response (last 500 chars):\n"""\n{last_assistant[-500:]}\n"""\n\n'
+        f'New user message: "{question}"'
+    )
 
-    A follow-up:
-    - References "your previous response", "that table", "the result above", "add X to it", etc.
-    - Cannot be understood without the previous assistant response.
-    - Asks to modify, extend, reformat, or clarify the previous answer.
-
-    A new question:
-    - Is self-contained and makes sense on its own.
-    - Asks about a different topic or different data.
-
-    Previous assistant response (last 500 chars):
-    \"\"\"
-    {last_assistant[-500:]}
-    \"\"\"
-
-    New user message: "{question}"
-
-    Respond with ONLY one word: FOLLOWUP or NEW
-    """
     response = client.chat.completions.create(
-        model="gpt-oss:20b-cloud",
-        messages=[{"role": "user", "content": prompt}],
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": _FOLLOWUP_SYSTEM},
+            {"role": "user",   "content": user_msg},
+        ],
         temperature=0.0
     )
     decision = response.choices[0].message.content.strip().upper()
@@ -109,7 +141,6 @@ def handle_followup(query: str, history: List[Dict]) -> dict:
 
         sql_data = update_sql_response(query, prior_sql)
 
-        # Save the updated SQL back to memory so chained follow-ups keep working
         if sql_data.get("sql_query"):
             _session_sql_memory["last_sql"] = sql_data["sql_query"]
 
@@ -130,34 +161,26 @@ def handle_followup(query: str, history: List[Dict]) -> dict:
         columns = sql_data.get("columns") or []
         rows    = sql_data.get("rows") or []
 
-        # Synthesize a clean answer from the real data
         rows_preview = "\n".join(str(r) for r in rows[:30])
-        large_table_note = (
+        table_note = (
             f"The result has {len(rows)} rows. DO NOT reproduce the full table. "
             "Give a brief summary and tell the user: 'The full data is available in the Evidence Drawer below.'"
         ) if len(rows) > 10 else "Present as a clean markdown table."
 
-        synth_prompt = f"""
-        You are an HR Insight Assistant. Answer the user’s follow-up using the data retrieved.
+        user_msg = (
+            f'Follow-up request: "{query}"\n\n'
+            f"SQL executed:\n{sql_data['sql_query']}\n\n"
+            f"Columns: {columns}\n"
+            f"Data ({len(rows)} rows):\n{rows_preview}\n\n"
+            f"Table instruction: {table_note}"
+        )
 
-        Follow-up request: "{query}"
-
-        SQL executed:
-        {sql_data['sql_query']}
-
-        Columns: {columns}
-        Data ({len(rows)} rows):
-        {rows_preview}
-
-        Instructions:
-        - {large_table_note}
-        - Add a brief 1–2 sentence insight below your answer.
-        - Use ONLY the data above — do NOT invent numbers.
-        - Use markdown formatting.
-        """
         synth = client.chat.completions.create(
-            model="gpt-oss:20b-cloud",
-            messages=[{"role": "user", "content": synth_prompt}],
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": _FOLLOWUP_SYNTH_SYSTEM},
+                {"role": "user",   "content": user_msg},
+            ],
             temperature=0.3
         )
         response_text = synth.choices[0].message.content.strip()
@@ -175,7 +198,7 @@ def handle_followup(query: str, history: List[Dict]) -> dict:
             }
         }
 
-    # Fallback: no prior SQL in memory — use conversation context
+    # Fallback: no prior SQL — use conversation context
     print("(Follow-up Handler) No prior SQL in memory — using LLM-only path")
     messages = [
         {
@@ -193,7 +216,7 @@ def handle_followup(query: str, history: List[Dict]) -> dict:
     messages.append({"role": "user", "content": query})
 
     response = client.chat.completions.create(
-        model="gpt-oss:20b-cloud",
+        model=MODEL,
         messages=messages,
         temperature=0.7
     )
@@ -215,28 +238,17 @@ def handle_followup(query: str, history: List[Dict]) -> dict:
 
 # ── Router ─────────────────────────────────────────────────────────────────────
 def decide_route(question: str) -> str:
-    prompt = f"""
-    You are an Intent Router. Classify the user query into ONE category.
-    
-    1. SQL: Questions about NUMBERS, HOURS, DATES, RATES, or TIMESHEETS.
-    2. VECTOR: Questions about REVIEWS, FEEDBACK, OPINIONS, or TEXT SUMMARIES.
-    3. BOTH: Questions asking for BOTH numbers AND qualitative feedback.
-    
-    User Query: "{question}"
-    
-    Output ONLY the category name: SQL, VECTOR, or BOTH.
-    """
     response = client.chat.completions.create(
-        model="gpt-oss:20b-cloud",
-        messages=[{"role": "user", "content": prompt}],
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": _ROUTER_SYSTEM},
+            {"role": "user",   "content": question},
+        ],
         temperature=0.1
     )
     choice = response.choices[0].message.content.strip().upper()
     print(f"(Router) Raw LLM output: '{choice}'")
 
-    # Scan word-by-word for exact category matches.
-    # This prevents a false SQL match when the LLM outputs e.g.
-    # "The answer is VECTOR (not SQL)" — a common model tendency.
     words = [w.strip(".,") for w in choice.split()]
     if "BOTH" in words:
         return "BOTH"
@@ -245,31 +257,18 @@ def decide_route(question: str) -> str:
     if "SQL" in words:
         return "SQL"
 
-    # Fallback: default to VECTOR (safer — SQL errors surface more visibly)
     print("(Router) Could not parse response cleanly — defaulting to VECTOR")
     return "VECTOR"
 
 
 # ── Decomposer ─────────────────────────────────────────────────────────────────
 def decompose_query(complex_question: str):
-    prompt = f"""
-    You are a Query Decomposer. The user has asked a complex question that requires data from TWO sources:
-    1. SQL Database (Employee hours, rates, project stats)
-    2. Vector Database (Performance reviews, qualitative feedback)
-    
-    User Question: "{complex_question}"
-    
-    Task: Break this into two separate, standalone questions.
-    - The SQL question should ask ONLY for the specific numbers/stats mentioned.
-    - The Vector question should ask ONLY for the qualitative review/feedback mentioned.
-    
-    Output Format:
-    SQL: [Insert SQL-focused question]
-    VECTOR: [Insert Vector-focused question]
-    """
     response = client.chat.completions.create(
-        model="gpt-oss:20b-cloud",
-        messages=[{"role": "user", "content": prompt}],
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": _DECOMPOSE_SYSTEM},
+            {"role": "user",   "content": complex_question},
+        ],
         temperature=0.1
     )
     result = response.choices[0].message.content.strip()
@@ -281,50 +280,31 @@ def decompose_query(complex_question: str):
         elif line.startswith("VECTOR:"):
             vector_q = line.replace("VECTOR:", "").strip()
 
-    if not sql_q:
-        sql_q = complex_question
-    if not vector_q:
-        vector_q = complex_question
-
-    return sql_q, vector_q
+    return sql_q or complex_question, vector_q or complex_question
 
 
 # ── Synthesizer ────────────────────────────────────────────────────────────────
 def synthesize_answer(user_input: str, final_context: str, row_count: int = 0) -> str:
-    # If the result set is large, instruct the LLM NOT to dump the full table.
-    if row_count > 10:
-        table_instruction = (
-            f"The result has {row_count} rows. DO NOT reproduce the full table in your answer. "
-            "Instead, give a brief summary (totals, max, min, averages as relevant) and tell the user: "
-            "'The full data is available in the Evidence Drawer below.'"
-        )
-    else:
-        table_instruction = (
-            "If SQL data is present, include it as a clean markdown table in your answer."
-        )
+    table_instruction = (
+        f"The result has {row_count} rows. DO NOT reproduce the full table. "
+        "Instead, give a brief summary (totals, max, min, averages as relevant) and tell the user: "
+        "'The full data is available in the Evidence Drawer below.'"
+        if row_count > 10
+        else "If SQL data is present, include it as a clean markdown table in your answer."
+    )
 
-    synth_prompt = f"""
-    You are an HR Insight Assistant. Answer the user's question using the data retrieved from both SQL and Vector databases.
-    
-    User Question: {user_input}
-    
-    Data Retrieved:
-    {final_context}
-    
-    Instructions:
-    - Use the SQL data for any numeric insights (hours, rates, project stats).
-    - Use the Vector data for any qualitative insights (reviews, feedback).
-    - If the user asked for a comparison, explicitly compare the numbers with the text insights.
-    - Always provide a clear, concise answer that directly addresses the user's original question.
-    - Avoid repeating the data; instead, synthesize it into actionable insights or conclusions.
-    - Provide a final recommendation if the data suggests one.
-    - {table_instruction}
-    - Be concise and professional.
-    - Use markdown formatting (bold, lists, tables) for clarity.
-    """
+    user_msg = (
+        f"User Question: {user_input}\n\n"
+        f"Data Retrieved:\n{final_context}\n\n"
+        f"Table instruction: {table_instruction}"
+    )
+
     response = client.chat.completions.create(
         model=MODEL,
-        messages=[{"role": "user", "content": synth_prompt}],
+        messages=[
+            {"role": "system", "content": _SYNTH_SYSTEM},
+            {"role": "user",   "content": user_msg},
+        ],
         temperature=0.7
     )
     return response.choices[0].message.content.strip()
@@ -332,11 +312,6 @@ def synthesize_answer(user_input: str, final_context: str, row_count: int = 0) -
 
 # ── Main Entry Point ───────────────────────────────────────────────────────────
 def process_query(query: str, history: List[Dict] = None) -> dict:
-    """
-    Process a user query through the RAG pipeline.
-    Returns a structured dict compatible with ChatResponse Pydantic model.
-    `history` is a list of {"role": "user"|"assistant", "content": str} dicts.
-    """
     if history is None:
         history = []
     start_time = time.time()
@@ -358,10 +333,9 @@ def process_query(query: str, history: List[Dict] = None) -> dict:
     print(f"  Query: '{query[:80]}{'...' if len(query) > 80 else ''}'")
     print(f"{'='*40}")
 
-    # Evidence containers
     sql_query_str = None
-    sql_columns = None
-    sql_table = None
+    sql_columns   = None
+    sql_table     = None
     vector_context = None
     vector_sources = None
     final_context_for_llm = ""
@@ -370,13 +344,11 @@ def process_query(query: str, history: List[Dict] = None) -> dict:
     if intent == "SQL":
         sql_data = text_to_sql_pipeline(query)
         sql_query_str = sql_data.get("sql_query")
-        sql_columns = sql_data.get("columns")
-        sql_table = sql_data.get("rows")
-        # Save to server-side memory so follow-ups can access it
+        sql_columns   = sql_data.get("columns")
+        sql_table     = sql_data.get("rows")
         if sql_query_str:
             _session_sql_memory["last_sql"] = sql_query_str
             print(f"   (Memory) Saved SQL to session memory")
-        # Build text context for synthesizer
         if sql_columns and sql_table:
             rows_text = "\n".join(str(row) for row in sql_table)
             final_context_for_llm = f"Columns: {sql_columns}\nData:\n{rows_text}"
@@ -388,7 +360,6 @@ def process_query(query: str, history: List[Dict] = None) -> dict:
         vector_context = vec_data.get("context")
         vector_sources = vec_data.get("sources")
         final_context_for_llm = vector_context or "No context found."
-        # Clear SQL memory — VECTOR responses have no SQL to follow up on
         _session_sql_memory.pop("last_sql", None)
 
     elif intent == "BOTH":
@@ -396,9 +367,8 @@ def process_query(query: str, history: List[Dict] = None) -> dict:
 
         sql_data = text_to_sql_pipeline(sql_sub_q)
         sql_query_str = sql_data.get("sql_query")
-        sql_columns = sql_data.get("columns")
-        sql_table = sql_data.get("rows")
-        # Save to server-side memory
+        sql_columns   = sql_data.get("columns")
+        sql_table     = sql_data.get("rows")
         if sql_query_str:
             _session_sql_memory["last_sql"] = sql_query_str
             print(f"(Memory) Saved SQL to session memory")
@@ -407,12 +377,11 @@ def process_query(query: str, history: List[Dict] = None) -> dict:
         vector_context = vec_data.get("context")
         vector_sources = vec_data.get("sources")
 
-        sql_text = ""
-        if sql_columns and sql_table:
-            sql_text = f"Columns: {sql_columns}\nData:\n" + "\n".join(str(r) for r in sql_table)
-        else:
-            sql_text = sql_data.get("error", "No SQL data.")
-
+        sql_text = (
+            f"Columns: {sql_columns}\nData:\n" + "\n".join(str(r) for r in sql_table)
+            if sql_columns and sql_table
+            else sql_data.get("error", "No SQL data.")
+        )
         final_context_for_llm = (
             f"--- NUMERIC DATA (SQL) ---\n{sql_text}\n\n"
             f"--- PERFORMANCE REVIEWS (TEXT) ---\n{vector_context or 'No vector data.'}"
@@ -422,7 +391,7 @@ def process_query(query: str, history: List[Dict] = None) -> dict:
     row_count = len(sql_table) if sql_table else 0
     response_text = synthesize_answer(query, final_context_for_llm, row_count=row_count)
 
-    # 4. Log the interaction to PostgreSQL (mirrors main_framework.py behaviour)
+    # 4. Log
     logs.log_interaction(
         query=query,
         intent=intent,

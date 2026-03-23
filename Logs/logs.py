@@ -27,7 +27,7 @@ def log_interaction(query, intent, tool, context, response, start_time):
         cursor = conn.cursor()
         
         sql = '''
-        INSERT INTO audit_logs (user_query, detected_intent, tool_used, raw_context, final_response, latency_seconds)
+        INSERT INTO techies_audit_logs (user_query, detected_intent, tool_used, raw_context, final_response, latency_seconds)
         VALUES (%s, %s, %s, %s, %s, %s)
         '''
         

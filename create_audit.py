@@ -14,11 +14,11 @@ def create_audit_table():
         conn = psycopg2.connect(**DB_CONFIG)
         cursor = conn.cursor()
         
-        print("Creating 'audit_logs' table...")
+        print("Creating 'techies_audit_logs' table...")
         
         # We store: Timestamp, User Query, Detected Intent, Tool Output, and Final Answer
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS audit_logs (
+        CREATE TABLE IF NOT EXISTS techies_audit_logs (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             user_query TEXT,
@@ -31,7 +31,7 @@ def create_audit_table():
         ''')
         
         conn.commit()
-        print("✅ Success! Table 'audit_logs' is ready.")
+        print("✅ Success! Table 'techies_audit_logs' is ready.")
         
     except Exception as e:
         print(f"❌ Error: {e}")

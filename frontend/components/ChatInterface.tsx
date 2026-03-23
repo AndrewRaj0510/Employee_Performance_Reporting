@@ -15,8 +15,8 @@ function generateId(): string {
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: React.ElementType }[] = [
     { value: "system", label: "System", icon: Monitor },
-    { value: "light",  label: "Light",  icon: Sun },
-    { value: "dark",   label: "Dark",   icon: Moon },
+    { value: "light", label: "Light", icon: Sun },
+    { value: "dark", label: "Dark", icon: Moon },
 ];
 
 function ThemeDropdown() {
@@ -221,9 +221,9 @@ export default function ChatInterface() {
                         </div>
                         <div className="flex flex-wrap gap-2 justify-center mt-2">
                             {[
-                                "Who worked the most overtime last month?",
-                                "Summarise Alice's performance reviews",
-                                "Compare hours worked vs reviews for the IT team",
+                                "Who had the most hours logged in last month?",
+                                "Summarise the performance reviews given by Shiney Sharma",
+                                "Which project had the most hours that was billable and non-billable?",
                             ].map((s) => (
                                 <button
                                     key={s}
